@@ -1,6 +1,6 @@
-# requirements.txt - Últimas versões estáveis
-streamlit
-pandas
-gspread
-google-auth
-plotly
+# requirements.txt
+streamlit>=1.28.0
+pandas>=2.0.0
+gspread>=5.0.0
+google-auth>=2.0.0
+plotly>=5.0.0
