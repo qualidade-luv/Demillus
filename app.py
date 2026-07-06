@@ -6,7 +6,6 @@ from google.oauth2.service_account import Credentials
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import json
 import re
 
 # Configuração da página
@@ -44,13 +43,6 @@ st.markdown("""
         color: #666;
         margin-top: 0.5rem;
     }
-    .success-message {
-        padding: 1rem;
-        background-color: #d4edda;
-        border-radius: 5px;
-        border: 1px solid #c3e6cb;
-        color: #155724;
-    }
     .payment-card {
         background-color: #e8f5e9;
         padding: 1rem;
@@ -64,6 +56,9 @@ st.markdown("""
         border-radius: 10px;
         border-left: 4px solid #FF9800;
         margin: 0.5rem 0;
+    }
+    .dataframe {
+        font-size: 14px !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -86,6 +81,33 @@ def conectar_google_sheets():
         st.error(f"❌ Erro ao conectar ao Google Sheets: {str(e)}")
         return None
 
+def limpar_valor_monetario(valor):
+    """Limpa e converte valores monetários para float"""
+    if pd.isna(valor) or valor == '':
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    # Remove "R$", espaços e substitui vírgula por ponto
+    valor_str = str(valor).replace('R$', '').replace(' ', '').replace(',', '.').strip()
+    # Remove qualquer coisa que não seja número ou ponto
+    valor_str = re.sub(r'[^\d.]', '', valor_str)
+    try:
+        return float(valor_str) if valor_str else 0.0
+    except:
+        return 0.0
+
+def limpar_valor_percentual(valor):
+    """Limpa e converte valores percentuais para float"""
+    if pd.isna(valor) or valor == '':
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    valor_str = str(valor).replace('%', '').replace(' ', '').replace(',', '.').strip()
+    try:
+        return float(valor_str) if valor_str else 0.0
+    except:
+        return 0.0
+
 def carregar_dados():
     """Carrega os dados da planilha Demillus - aba PEDIDOS"""
     try:
@@ -105,30 +127,99 @@ def carregar_dados():
             st.error("❌ Aba 'PEDIDOS' não encontrada. Verifique o nome da aba.")
             return None
         
+        # Obtém todos os dados
         dados = worksheet.get_all_values()
         
         if not dados or len(dados) < 2:
             return pd.DataFrame()
         
+        # Primeira linha como cabeçalho
         cabecalho = dados[0]
         dados = dados[1:]
         
+        # Cria DataFrame
         df = pd.DataFrame(dados, columns=cabecalho)
         df = df.replace('', pd.NA)
         
+        # Mapeamento de colunas esperadas
+        mapeamento_colunas = {
+            'ID': ['ID', 'id'],
+            'CAMPANHA': ['CAMPANHA', 'Campanha', 'campanha'],
+            'CLIENTE': ['CLIENTE', 'Cliente', 'cliente'],
+            'CODIGO': ['CODIGO', 'Código', 'codigo'],
+            'REFERÊNCIA': ['REFERÊNCIA', 'Referência', 'referencia'],
+            'TAMANHO': ['TAMANHO', 'Tamanho', 'tamanho'],
+            'COR': ['COR', 'Cor', 'cor'],
+            'QUANTIDADE': ['QUANTIDADE', 'Quantidade', 'quantidade'],
+            'VALOR_PAGO': ['VALOR_PAGO', 'Valor Pago', 'valor_pago'],
+            'DEDUÇÃO': ['DEDUÇÃO', 'Dedução', 'deducao', 'DEDUCAO'],
+            'VALOR_CLIENTE': ['VALOR _CLIENTE', 'VALOR_CLIENTE', 'Valor Cliente', 'valor_cliente']
+        }
+        
+        # Renomeia colunas para o padrão
+        colunas_atuais = df.columns.tolist()
+        for coluna_padrao, possiveis in mapeamento_colunas.items():
+            for possivel in possiveis:
+                if possivel in colunas_atuais:
+                    df = df.rename(columns={possivel: coluna_padrao})
+                    break
+        
+        # Garante que todas as colunas necessárias existam
+        colunas_necessarias = ['ID', 'CAMPANHA', 'CLIENTE', 'QUANTIDADE', 'VALOR_PAGO', 'DEDUÇÃO', 'VALOR_CLIENTE']
+        for col in colunas_necessarias:
+            if col not in df.columns:
+                df[col] = 0 if col in ['QUANTIDADE', 'VALOR_PAGO', 'DEDUÇÃO', 'VALOR_CLIENTE'] else ''
+        
         # Converte colunas numéricas
-        colunas_numericas = ['QUANTIDADE', 'VALOR_PAGO', 'DEDUÇÃO', 'VALOR _CLIENTE', 'VALOR_PAGO_ACUMULADO', 'SALDO_DEVEDOR']
-        for col in colunas_numericas:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        # Quantidade
+        df['QUANTIDADE'] = pd.to_numeric(df['QUANTIDADE'], errors='coerce').fillna(0)
+        
+        # Valor Pago - limpa formatação
+        df['VALOR_PAGO'] = df['VALOR_PAGO'].apply(limpar_valor_monetario)
+        
+        # Dedução - pode ser percentual ou valor
+        df['DEDUÇÃO'] = df['DEDUÇÃO'].apply(limpar_valor_percentual)
+        
+        # Valor Cliente - limpa formatação
+        df['VALOR_CLIENTE'] = df['VALOR_CLIENTE'].apply(limpar_valor_monetario)
+        
+        # Se DEDUÇÃO for percentual (> 1), calcula o valor
+        # Verifica se a dedução parece ser percentual (valores entre 1 e 100)
+        if df['DEDUÇÃO'].max() > 1 and df['DEDUÇÃO'].max() <= 100:
+            df['VALOR_DEDUCAO'] = (df['VALOR_PAGO'] * df['DEDUÇÃO'] / 100)
+        else:
+            df['VALOR_DEDUCAO'] = df['DEDUÇÃO']
+        
+        # Recalcula VALOR_CLIENTE se necessário
+        # Se VALOR_CLIENTE estiver zerado ou incorreto, recalcula
+        if df['VALOR_CLIENTE'].sum() == 0 or (df['VALOR_CLIENTE'] != (df['VALOR_PAGO'] - df['VALOR_DEDUCAO'])).any():
+            df['VALOR_CLIENTE'] = df['VALOR_PAGO'] - df['VALOR_DEDUCAO']
+        
+        # Adiciona colunas de pagamento
+        if 'VALOR_PAGO_ACUMULADO' not in df.columns:
+            df['VALOR_PAGO_ACUMULADO'] = 0.0
+        else:
+            df['VALOR_PAGO_ACUMULADO'] = df['VALOR_PAGO_ACUMULADO'].apply(limpar_valor_monetario)
+        
+        if 'SALDO_DEVEDOR' not in df.columns:
+            df['SALDO_DEVEDOR'] = df['VALOR_CLIENTE']
+        else:
+            df['SALDO_DEVEDOR'] = df['SALDO_DEVEDOR'].apply(limpar_valor_monetario)
+            # Se saldo devedor for 0 mas valor cliente > 0, corrige
+            df.loc[(df['SALDO_DEVEDOR'] == 0) & (df['VALOR_CLIENTE'] > 0), 'SALDO_DEVEDOR'] = df['VALOR_CLIENTE']
         
         # Remove linhas completamente vazias
         df = df.dropna(how='all')
+        
+        # Mostra dados carregados para debug
+        st.success(f"✅ Dados carregados com sucesso! {len(df)} pedidos encontrados.")
         
         return df
         
     except Exception as e:
         st.error(f"❌ Erro ao carregar dados: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 def salvar_dados(df):
@@ -172,72 +263,19 @@ def calcular_metricas(df):
             'total_saldo_devedor': 0
         }
     
-    # Ajusta nomes das colunas
-    colunas = df.columns.tolist()
-    
-    # Encontra as colunas necessárias
-    col_valor_cliente = None
-    col_valor_pago = None
-    col_deducao = None
-    col_quantidade = None
-    col_cliente = None
-    col_campanha = None
-    col_valor_pago_acumulado = None
-    col_saldo_devedor = None
-    
-    for col in colunas:
-        if 'VALOR _CLIENTE' in col or 'VALOR_CLIENTE' in col:
-            col_valor_cliente = col
-        elif 'VALOR_PAGO' in col and 'ACUMULADO' not in col:
-            col_valor_pago = col
-        elif 'DEDUÇÃO' in col or 'DEDUCAO' in col:
-            col_deducao = col
-        elif 'QUANTIDADE' in col:
-            col_quantidade = col
-        elif 'CLIENTE' in col:
-            col_cliente = col
-        elif 'CAMPANHA' in col:
-            col_campanha = col
-        elif 'VALOR_PAGO_ACUMULADO' in col:
-            col_valor_pago_acumulado = col
-        elif 'SALDO_DEVEDOR' in col:
-            col_saldo_devedor = col
-    
     # Calcula as métricas
     total_pedidos = len(df)
-    total_clientes = df[col_cliente].nunique() if col_cliente else 0
+    total_clientes = df['CLIENTE'].nunique() if 'CLIENTE' in df.columns else 0
     
-    if col_valor_pago:
-        faturamento_bruto = df[col_valor_pago].sum()
-    else:
-        faturamento_bruto = 0
-    
-    if col_deducao:
-        total_deducoes = df[col_deducao].sum()
-    else:
-        total_deducoes = 0
-    
-    if col_valor_cliente:
-        faturamento_liquido = df[col_valor_cliente].sum()
-    else:
-        faturamento_liquido = 0
+    faturamento_bruto = df['VALOR_PAGO'].sum() if 'VALOR_PAGO' in df.columns else 0
+    total_deducoes = df['VALOR_DEDUCAO'].sum() if 'VALOR_DEDUCAO' in df.columns else 0
+    faturamento_liquido = df['VALOR_CLIENTE'].sum() if 'VALOR_CLIENTE' in df.columns else 0
     
     valor_medio_pedido = faturamento_liquido / total_pedidos if total_pedidos > 0 else 0
+    total_itens = df['QUANTIDADE'].sum() if 'QUANTIDADE' in df.columns else 0
     
-    if col_quantidade:
-        total_itens = df[col_quantidade].sum()
-    else:
-        total_itens = 0
-    
-    if col_valor_pago_acumulado:
-        total_recebido = df[col_valor_pago_acumulado].sum()
-    else:
-        total_recebido = 0
-    
-    if col_saldo_devedor:
-        total_saldo_devedor = df[col_saldo_devedor].sum()
-    else:
-        total_saldo_devedor = 0
+    total_recebido = df['VALOR_PAGO_ACUMULADO'].sum() if 'VALOR_PAGO_ACUMULADO' in df.columns else 0
+    total_saldo_devedor = df['SALDO_DEVEDOR'].sum() if 'SALDO_DEVEDOR' in df.columns else 0
     
     return {
         'total_pedidos': total_pedidos,
@@ -248,15 +286,7 @@ def calcular_metricas(df):
         'valor_medio_pedido': valor_medio_pedido,
         'total_itens': total_itens,
         'total_recebido': total_recebido,
-        'total_saldo_devedor': total_saldo_devedor,
-        'col_valor_cliente': col_valor_cliente,
-        'col_valor_pago': col_valor_pago,
-        'col_deducao': col_deducao,
-        'col_quantidade': col_quantidade,
-        'col_cliente': col_cliente,
-        'col_campanha': col_campanha,
-        'col_valor_pago_acumulado': col_valor_pago_acumulado,
-        'col_saldo_devedor': col_saldo_devedor
+        'total_saldo_devedor': total_saldo_devedor
     }
 
 # ============================
@@ -268,7 +298,6 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.image("https://via.placeholder.com/150x150/1E88E5/FFFFFF?text=Demillus", use_container_width=True)
         st.markdown("## 📋 Menu")
         
         opcao = st.radio(
@@ -349,15 +378,15 @@ def mostrar_dashboard(df):
     
     with col1:
         st.subheader("📈 Faturamento por Campanha")
-        if metricas['col_campanha'] and metricas['col_valor_cliente']:
-            df_campanha = df.groupby(metricas['col_campanha'])[metricas['col_valor_cliente']].sum().reset_index()
-            df_campanha = df_campanha.sort_values(metricas['col_valor_cliente'], ascending=True).tail(10)
+        if 'CAMPANHA' in df.columns and 'VALOR_CLIENTE' in df.columns:
+            df_campanha = df.groupby('CAMPANHA')['VALOR_CLIENTE'].sum().reset_index()
+            df_campanha = df_campanha.sort_values('VALOR_CLIENTE', ascending=True).tail(10)
             
             fig = px.bar(df_campanha, 
-                        x=metricas['col_valor_cliente'], 
-                        y=metricas['col_campanha'],
+                        x='VALOR_CLIENTE', 
+                        y='CAMPANHA',
                         title="Top 10 Campanhas por Faturamento",
-                        color=metricas['col_valor_cliente'],
+                        color='VALOR_CLIENTE',
                         color_continuous_scale='Blues')
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
@@ -366,13 +395,13 @@ def mostrar_dashboard(df):
     
     with col2:
         st.subheader("🏆 Top 5 Clientes")
-        if metricas['col_cliente'] and metricas['col_valor_cliente']:
-            df_clientes = df.groupby(metricas['col_cliente'])[metricas['col_valor_cliente']].sum().reset_index()
-            df_clientes = df_clientes.sort_values(metricas['col_valor_cliente'], ascending=False).head(5)
+        if 'CLIENTE' in df.columns and 'VALOR_CLIENTE' in df.columns:
+            df_clientes = df.groupby('CLIENTE')['VALOR_CLIENTE'].sum().reset_index()
+            df_clientes = df_clientes.sort_values('VALOR_CLIENTE', ascending=False).head(5)
             
             fig = px.pie(df_clientes, 
-                        values=metricas['col_valor_cliente'], 
-                        names=metricas['col_cliente'],
+                        values='VALOR_CLIENTE', 
+                        names='CLIENTE',
                         title="Concentração de Faturamento",
                         color_discrete_sequence=px.colors.sequential.Blues_r)
             fig.update_layout(height=400)
@@ -380,52 +409,25 @@ def mostrar_dashboard(df):
         else:
             st.info("Dados insuficientes para exibir o gráfico")
     
-    # Tabela de pedidos com status de pagamento
+    # Tabela de pedidos
     st.markdown("---")
-    st.subheader("📋 Status de Pagamentos")
+    st.subheader("📋 Lista de Pedidos")
     
-    if 'ID' in df.columns and 'VALOR _CLIENTE' in df.columns:
-        # Verifica se as colunas de pagamento existem
-        if 'VALOR_PAGO_ACUMULADO' not in df.columns:
-            df['VALOR_PAGO_ACUMULADO'] = 0
-        if 'SALDO_DEVEDOR' not in df.columns:
-            df['SALDO_DEVEDOR'] = df['VALOR _CLIENTE']
+    # Seleciona colunas para exibir
+    colunas_exibir = []
+    for col in ['ID', 'CAMPANHA', 'CLIENTE', 'REFERÊNCIA', 'QUANTIDADE', 'VALOR_CLIENTE', 'SALDO_DEVEDOR']:
+        if col in df.columns:
+            colunas_exibir.append(col)
+    
+    if colunas_exibir:
+        df_exibir = df[colunas_exibir].copy()
         
-        # Cria coluna de status
-        df_status = df.copy()
-        df_status['STATUS'] = df_status.apply(
-            lambda row: '✅ Pago' if row['SALDO_DEVEDOR'] <= 0 else 
-                       ('🟡 Parcial' if row['VALOR_PAGO_ACUMULADO'] > 0 else '🔴 Pendente'),
-            axis=1
-        )
+        # Formata valores
+        for col in df_exibir.columns:
+            if 'VALOR' in col or 'SALDO' in col:
+                df_exibir[col] = df_exibir[col].apply(lambda x: f"R$ {x:,.2f}" if pd.notna(x) else "R$ 0,00")
         
-        # Seleciona colunas para exibir
-        colunas_exibir = []
-        for col in ['ID', 'CLIENTE', 'VALOR _CLIENTE', 'VALOR_PAGO_ACUMULADO', 'SALDO_DEVEDOR', 'STATUS']:
-            if col in df_status.columns:
-                colunas_exibir.append(col)
-        
-        if colunas_exibir:
-            df_exibir = df_status[colunas_exibir].head(10).copy()
-            # Formata valores
-            for col in df_exibir.columns:
-                if 'VALOR' in col or 'SALDO' in col:
-                    df_exibir[col] = df_exibir[col].apply(lambda x: f"R$ {x:,.2f}" if pd.notna(x) else "R$ 0,00")
-            
-            st.dataframe(df_exibir, use_container_width=True)
-            
-            # Estatísticas de pagamento
-            col1, col2, col3 = st.columns(3)
-            total_pagos = len(df_status[df_status['SALDO_DEVEDOR'] <= 0])
-            total_parciais = len(df_status[(df_status['SALDO_DEVEDOR'] > 0) & (df_status['VALOR_PAGO_ACUMULADO'] > 0)])
-            total_pendentes = len(df_status[df_status['VALOR_PAGO_ACUMULADO'] == 0])
-            
-            with col1:
-                st.metric("✅ Pagos", total_pagos)
-            with col2:
-                st.metric("🟡 Parciais", total_parciais)
-            with col3:
-                st.metric("🔴 Pendentes", total_pendentes)
+        st.dataframe(df_exibir, use_container_width=True)
 
 def cadastrar_pedido(df):
     """Formulário para cadastrar novos pedidos"""
@@ -437,20 +439,20 @@ def cadastrar_pedido(df):
         col1, col2 = st.columns(2)
         
         with col1:
-            id_pedido = st.text_input("ID do Pedido", placeholder="Ex: PED001")
-            campanha = st.text_input("Campanha", placeholder="Ex: BLACK_FRIDAY_2026")
+            id_pedido = st.text_input("ID do Pedido", placeholder="Ex: 1, 2, 3...")
+            campanha = st.text_input("Campanha", placeholder="Ex: 10")
             cliente = st.text_input("Cliente", placeholder="Nome do cliente")
             codigo = st.text_input("Código", placeholder="Código do produto")
             referencia = st.text_input("Referência", placeholder="Referência do produto")
         
         with col2:
             tamanho = st.text_input("Tamanho", placeholder="Ex: M, G, 42")
-            cor = st.text_input("Cor", placeholder="Ex: Azul, Vermelho")
+            cor = st.text_input("Cor", placeholder="Ex: 55, 27")
             quantidade = st.number_input("Quantidade", min_value=1, value=1, step=1)
-            valor_pago = st.number_input("Valor Pago (R$)", min_value=0.0, value=0.0, step=1.0)
-            deducao = st.number_input("Dedução (R$)", min_value=0.0, value=0.0, step=1.0)
+            valor_pago = st.number_input("Valor Pago (R$)", min_value=0.0, value=0.0, step=0.01)
+            deducao = st.number_input("Dedução (%)", min_value=0.0, value=24.9, step=0.1)
         
-        valor_cliente = valor_pago - deducao
+        valor_cliente = valor_pago * (1 - deducao / 100)
         
         st.markdown(f"""
             <div style="background-color: #e3f2fd; padding: 1rem; border-radius: 5px; margin: 1rem 0;">
@@ -470,7 +472,7 @@ def cadastrar_pedido(df):
         
         # Verifica se ID já existe
         if df is not None and not df.empty and 'ID' in df.columns:
-            if id_pedido in df['ID'].values:
+            if str(id_pedido) in df['ID'].astype(str).values:
                 st.error(f"❌ ID '{id_pedido}' já existe! Use um ID diferente.")
                 return
         
@@ -486,9 +488,10 @@ def cadastrar_pedido(df):
             'QUANTIDADE': quantidade,
             'VALOR_PAGO': valor_pago,
             'DEDUÇÃO': deducao,
-            'VALOR _CLIENTE': valor_cliente,
-            'VALOR_PAGO_ACUMULADO': 0,  # Inicialmente zero
-            'SALDO_DEVEDOR': valor_cliente  # Saldo devedor igual ao valor total
+            'VALOR_CLIENTE': valor_cliente,
+            'VALOR_DEDUCAO': valor_pago * deducao / 100,
+            'VALOR_PAGO_ACUMULADO': 0,
+            'SALDO_DEVEDOR': valor_cliente
         }
         
         try:
@@ -501,12 +504,6 @@ def cadastrar_pedido(df):
             # Salva na planilha
             if salvar_dados(df_novo):
                 st.success("✅ Pedido cadastrado com sucesso!")
-                
-                # Resumo do pedido
-                st.markdown("### 📋 Resumo do Pedido")
-                resumo_df = pd.DataFrame([novo_pedido])
-                st.dataframe(resumo_df, use_container_width=True)
-                
                 st.balloons()
             else:
                 st.error("❌ Erro ao salvar o pedido na planilha!")
@@ -523,15 +520,15 @@ def registrar_pagamento(df):
         return
     
     # Verifica se as colunas necessárias existem
-    if 'ID' not in df.columns or 'VALOR _CLIENTE' not in df.columns:
+    if 'ID' not in df.columns or 'VALOR_CLIENTE' not in df.columns:
         st.error("❌ A planilha não possui as colunas necessárias para registrar pagamentos.")
         return
     
     # Adiciona colunas de pagamento se não existirem
     if 'VALOR_PAGO_ACUMULADO' not in df.columns:
-        df['VALOR_PAGO_ACUMULADO'] = 0
+        df['VALOR_PAGO_ACUMULADO'] = 0.0
     if 'SALDO_DEVEDOR' not in df.columns:
-        df['SALDO_DEVEDOR'] = df['VALOR _CLIENTE']
+        df['SALDO_DEVEDOR'] = df['VALOR_CLIENTE']
     
     # Filtra pedidos com saldo devedor > 0
     df_com_debito = df[df['SALDO_DEVEDOR'] > 0].copy()
@@ -579,7 +576,7 @@ def registrar_pagamento(df):
         st.write(f"**Cliente:** {pedido['CLIENTE']}")
     
     with col2:
-        st.write(f"**Valor Total:** R$ {pedido['VALOR _CLIENTE']:,.2f}")
+        st.write(f"**Valor Total:** R$ {pedido['VALOR_CLIENTE']:,.2f}")
         st.write(f"**Já Pago:** R$ {pedido['VALOR_PAGO_ACUMULADO']:,.2f}")
     
     with col3:
@@ -621,22 +618,6 @@ def registrar_pagamento(df):
             # Salva na planilha
             if salvar_dados(df):
                 st.success(f"✅ Pagamento de R$ {valor_pagamento:,.2f} registrado com sucesso!")
-                
-                # Exibe resumo do pagamento
-                st.markdown("### 📋 Resumo do Pagamento")
-                resumo = {
-                    'Pedido': pedido['ID'],
-                    'Cliente': pedido['CLIENTE'],
-                    'Valor Pago': f"R$ {valor_pagamento:,.2f}",
-                    'Data': data_pagamento.strftime('%d/%m/%Y'),
-                    'Novo Saldo Devedor': f"R$ {novo_saldo:,.2f}",
-                    'Status': '✅ Pago' if novo_saldo <= 0 else '🟡 Parcial'
-                }
-                
-                if observacao:
-                    resumo['Observação'] = observacao
-                
-                st.json(resumo)
                 
                 if novo_saldo <= 0:
                     st.balloons()
@@ -682,22 +663,15 @@ def mostrar_analises(df):
         # Indicador de margem
         if metricas['faturamento_bruto'] > 0:
             margem = ((metricas['faturamento_liquido'] - metricas['faturamento_bruto']) / metricas['faturamento_bruto']) * 100
-            st.metric("Margem Líquida", f"{margem:.1f}%", 
-                     delta=f"{margem:.1f}%" if margem > 0 else f"{margem:.1f}%",
-                     delta_color="normal" if margem > 0 else "inverse")
+            st.metric("Margem Líquida", f"{margem:.1f}%")
     
     with tabs[1]:
         st.subheader("💰 Análise de Pagamentos")
         
-        if 'VALOR_PAGO_ACUMULADO' not in df.columns:
-            df['VALOR_PAGO_ACUMULADO'] = 0
-        if 'SALDO_DEVEDOR' not in df.columns:
-            df['SALDO_DEVEDOR'] = df['VALOR _CLIENTE']
-        
         # Métricas de pagamento
         col1, col2, col3 = st.columns(3)
         
-        total_geral = df['VALOR _CLIENTE'].sum()
+        total_geral = df['VALOR_CLIENTE'].sum()
         total_recebido = df['VALOR_PAGO_ACUMULADO'].sum()
         total_saldo = df['SALDO_DEVEDOR'].sum()
         percentual_pago = (total_recebido / total_geral * 100) if total_geral > 0 else 0
@@ -709,10 +683,9 @@ def mostrar_analises(df):
         with col3:
             st.metric("Percentual Recebido", f"{percentual_pago:.1f}%")
         
-        # Gráfico de evolução de pagamentos
+        # Gráfico de status
         st.subheader("📊 Status de Pagamentos por Pedido")
         
-        # Cria categorias de status
         df['STATUS_PAGAMENTO'] = df.apply(
             lambda row: 'Pago' if row['SALDO_DEVEDOR'] <= 0 else 
                        ('Parcial' if row['VALOR_PAGO_ACUMULADO'] > 0 else 'Pendente'),
@@ -735,27 +708,28 @@ def mostrar_analises(df):
         fig.update_layout(height=400)
         st.plotly_chart(fig, use_container_width=True)
         
-        # Lista de pedidos com pagamentos pendentes
+        # Lista de pedidos pendentes
         st.subheader("📋 Pedidos com Pagamento Pendente")
         
         df_pendentes = df[df['SALDO_DEVEDOR'] > 0].copy()
         if not df_pendentes.empty:
-            df_pendentes_exibir = df_pendentes[['ID', 'CLIENTE', 'VALOR _CLIENTE', 'VALOR_PAGO_ACUMULADO', 'SALDO_DEVEDOR']].head(20)
-            for col in ['VALOR _CLIENTE', 'VALOR_PAGO_ACUMULADO', 'SALDO_DEVEDOR']:
-                if col in df_pendentes_exibir.columns:
-                    df_pendentes_exibir[col] = df_pendentes_exibir[col].apply(lambda x: f"R$ {x:,.2f}")
-            st.dataframe(df_pendentes_exibir, use_container_width=True)
+            colunas_show = ['ID', 'CLIENTE', 'VALOR_CLIENTE', 'VALOR_PAGO_ACUMULADO', 'SALDO_DEVEDOR']
+            df_show = df_pendentes[[c for c in colunas_show if c in df_pendentes.columns]].head(20)
+            for col in df_show.columns:
+                if 'VALOR' in col or 'SALDO' in col:
+                    df_show[col] = df_show[col].apply(lambda x: f"R$ {x:,.2f}")
+            st.dataframe(df_show, use_container_width=True)
         else:
             st.success("🎉 Todos os pedidos estão pagos!")
     
     with tabs[2]:
         st.subheader("Análise por Cliente")
         
-        if metricas['col_cliente'] and metricas['col_valor_cliente']:
-            df_cliente = df.groupby(metricas['col_cliente']).agg({
-                metricas['col_valor_cliente']: 'sum',
+        if 'CLIENTE' in df.columns and 'VALOR_CLIENTE' in df.columns:
+            df_cliente = df.groupby('CLIENTE').agg({
+                'VALOR_CLIENTE': 'sum',
                 'ID': 'count',
-                'VALOR_PAGO_ACUMULADO': 'sum' if 'VALOR_PAGO_ACUMULADO' in df.columns else 'sum'
+                'VALOR_PAGO_ACUMULADO': 'sum'
             }).reset_index()
             df_cliente.columns = ['Cliente', 'Faturamento', 'Qtd_Pedidos', 'Total_Pago']
             df_cliente['Saldo_Devedor'] = df_cliente['Faturamento'] - df_cliente['Total_Pago']
@@ -773,23 +747,21 @@ def mostrar_analises(df):
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Tabela completa de clientes
+            # Tabela completa
             st.subheader("Lista de Clientes")
             df_cliente_exibir = df_cliente.copy()
-            df_cliente_exibir['Faturamento'] = df_cliente_exibir['Faturamento'].apply(lambda x: f"R$ {x:,.2f}")
-            df_cliente_exibir['Total_Pago'] = df_cliente_exibir['Total_Pago'].apply(lambda x: f"R$ {x:,.2f}")
-            df_cliente_exibir['Saldo_Devedor'] = df_cliente_exibir['Saldo_Devedor'].apply(lambda x: f"R$ {x:,.2f}")
+            for col in ['Faturamento', 'Total_Pago', 'Saldo_Devedor']:
+                df_cliente_exibir[col] = df_cliente_exibir[col].apply(lambda x: f"R$ {x:,.2f}")
             st.dataframe(df_cliente_exibir, use_container_width=True)
     
     with tabs[3]:
         st.subheader("Análise por Produto")
         
-        if 'REFERÊNCIA' in df.columns and metricas['col_valor_cliente']:
-            df_produto = df.groupby('REFERÊNCIA')[metricas['col_valor_cliente']].sum().reset_index()
+        if 'REFERÊNCIA' in df.columns and 'VALOR_CLIENTE' in df.columns:
+            df_produto = df.groupby('REFERÊNCIA')['VALOR_CLIENTE'].sum().reset_index()
             df_produto.columns = ['Referência', 'Faturamento']
             df_produto = df_produto.sort_values('Faturamento', ascending=False)
             
-            # Top produtos
             fig = px.pie(df_produto.head(10), 
                         values='Faturamento', 
                         names='Referência',
@@ -798,14 +770,11 @@ def mostrar_analises(df):
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Lista de produtos
             st.dataframe(df_produto.head(20), use_container_width=True)
 
 def mostrar_configuracoes(df):
     """Configurações do sistema"""
     st.markdown("## ⚙️ Configurações")
-    
-    st.info("🔧 Esta seção permite visualizar e gerenciar as configurações do sistema.")
     
     # Status da conexão
     st.subheader("📊 Status da Conexão")
@@ -826,11 +795,8 @@ def mostrar_configuracoes(df):
             st.write(f"**Colunas:** {', '.join(df.columns.tolist())}")
         
         with col2:
-            # Estatísticas básicas
-            st.write("**Tipos de dados:**")
-            tipos = df.dtypes.to_dict()
-            for col, tipo in tipos.items():
-                st.write(f"- {col}: {tipo}")
+            st.write("**Amostra dos dados:**")
+            st.dataframe(df.head(3), use_container_width=True)
     
     # Exportar dados
     st.subheader("📥 Exportar Dados")
